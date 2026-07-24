@@ -1,0 +1,95 @@
+name: 'DLP Secret Scan'
+description: 'Scan for PII, secrets, and sensitive data in your codebase using dlp-patterns'
+author: 'Spidercob'
+
+branding:
+  icon: 'shield'
+  color: 'red'
+
+inputs:
+  path:
+    description: 'File or directory to scan'
+    required: false
+    default: '.'
+  secrets-only:
+    description: 'Only scan for API keys and credentials, skip PII. Faster for source code.'
+    required: false
+    default: 'false'
+  fail-on:
+    description: 'Minimum severity to fail the build: critical, high, medium, low'
+    required: false
+    default: 'critical'
+
+outputs:
+  findings-count:
+    description: 'Total number of findings across all severities'
+    value: ${{ steps.scan.outputs.findings-count }}
+  highest-severity:
+    description: 'Highest severity found: CRITICAL, HIGH, MEDIUM, LOW, or none'
+    value: ${{ steps.scan.outputs.highest-severity }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dlp-patterns
+      shell: bash
+      run: pip install dlp-patterns --quiet
+
+    - name: Run DLP scan
+      id: scan
+      shell: bash
+      run: |
+        FLAGS="--json"
+        if [ "${{ inputs.secrets-only }}" = "true" ]; then
+          FLAGS="$FLAGS --secrets-only"
+        fi
+
+        set +e
+        RESULT=$(dlp-scan $FLAGS "${{ inputs.path }}" 2>&1)
+        set -e
+
+        echo "$RESULT"
+
+        COUNT=$(echo "$RESULT" | python3 -c "
+        import sys, json
+        try:
+            data = json.loads(sys.stdin.read())
+            print(sum(len(v) for v in data.values()))
+        except:
+            print(0)
+        ")
+
+        HIGHEST=$(echo "$RESULT" | python3 -c "
+        import sys, json
+        try:
+            data = json.loads(sys.stdin.read())
+            for sev in ['CRITICAL','HIGH','MEDIUM','LOW']:
+                if data.get(sev):
+                    print(sev)
+                    sys.exit(0)
+            print('none')
+        except:
+            print('none')
+        ")
+
+        echo "findings-count=$COUNT" >> $GITHUB_OUTPUT
+        echo "highest-severity=$HIGHEST" >> $GITHUB_OUTPUT
+
+        declare -A RANK=([critical]=1 [high]=2 [medium]=3 [low]=4 [none]=99)
+        FAIL_ON_LOWER=$(echo "${{ inputs.fail-on }}" | tr '[:upper:]' '[:lower:]')
+        HIGHEST_LOWER=$(echo "$HIGHEST" | tr '[:upper:]' '[:lower:]')
+
+        FAIL_RANK=${RANK[$FAIL_ON_LOWER]:-1}
+        HIGHEST_RANK=${RANK[$HIGHEST_LOWER]:-99}
+
+        if [ "$HIGHEST_LOWER" != "none" ] && [ "$HIGHEST_RANK" -le "$FAIL_RANK" ]; then
+          echo "::error::DLP scan found $HIGHEST severity findings ($COUNT total). Failing build."
+          exit 1
+        fi
+
+        echo "DLP scan complete. $COUNT finding(s). Highest severity: $HIGHEST"

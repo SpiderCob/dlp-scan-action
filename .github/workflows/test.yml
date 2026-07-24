@@ -1,0 +1,19 @@
+name: Test Action
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run DLP scan on this repo
+        uses: ./
+        with:
+          path: '.'
+          secrets-only: 'true'
+          fail-on: 'critical'
