@@ -1,0 +1,91 @@
+name: 'Spidercob DLP Scan'
+description: 'Scan files for PII, secrets, and sensitive data using the Spidercob DLP engine.'
+author: 'SpiderCob'
+
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  token:
+    description: 'Spidercob API token (use secrets.SPIDERCOB_TOKEN)'
+    required: true
+  paths:
+    description: 'Files or directories to scan. Defaults to changed files in the PR/push.'
+    required: false
+    default: ''
+  fail-on:
+    description: 'Minimum severity to fail the workflow: CRITICAL | HIGH | MEDIUM | LOW'
+    required: false
+    default: 'HIGH'
+  track:
+    description: 'Scan track: guardian (DLP/PII) | sentinel (malware)'
+    required: false
+    default: 'guardian'
+  secrets-only:
+    description: 'Only scan for secrets and credentials (faster)'
+    required: false
+    default: 'false'
+
+outputs:
+  findings-count:
+    description: 'Total number of findings across all scanned files'
+    value: ${{ steps.scan.outputs.findings_count }}
+  highest-severity:
+    description: 'Highest severity found: CRITICAL | HIGH | MEDIUM | LOW | NONE'
+    value: ${{ steps.scan.outputs.highest_severity }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect changed files
+      id: changed
+      if: inputs.paths == ''
+      shell: bash
+      run: |
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+        else
+          BASE="${{ github.event.before }}"
+          HEAD="${{ github.sha }}"
+        fi
+        FILES=$(git diff --name-only "$BASE" "$HEAD" 2>/dev/null \
+          | grep -E '\.(py|js|ts|go|java|rb|php|cs|cpp|c|json|yaml|yml|xml|csv|txt|pdf|docx|sql|env)$' \
+          | tr '\n' ' ')
+        echo "files=$FILES" >> $GITHUB_OUTPUT
+
+    - name: Run DLP scan
+      id: scan
+      shell: bash
+      env:
+        SPIDERCOB_TOKEN: ${{ inputs.token }}
+      run: |
+        SCAN_PATHS="${{ inputs.paths }}"
+        if [ -z "$SCAN_PATHS" ]; then
+          SCAN_PATHS="${{ steps.changed.outputs.files }}"
+        fi
+
+        if [ -z "$SCAN_PATHS" ]; then
+          echo "No files to scan."
+          echo "findings_count=0" >> $GITHUB_OUTPUT
+          echo "highest_severity=NONE" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        ARGS="--fail-on=${{ inputs.fail-on }} --track=${{ inputs.track }}"
+        if [ "${{ inputs.secrets-only }}" = "true" ]; then
+          ARGS="$ARGS --secrets-only"
+        fi
+
+        RESULT=$(npx spidercob-dlp $ARGS $SCAN_PATHS 2>&1) || FAILED=1
+        echo "$RESULT"
+
+        COUNT=$(echo "$RESULT" | grep -c "^\[" 2>/dev/null || echo "0")
+        SEVERITY=$(echo "$RESULT" | grep -oE 'CRITICAL|HIGH|MEDIUM|LOW' | head -1 || echo "NONE")
+
+        echo "findings_count=$COUNT" >> $GITHUB_OUTPUT
+        echo "highest_severity=${SEVERITY:-NONE}" >> $GITHUB_OUTPUT
+
+        [ "${FAILED}" = "1" ] && exit 1
+        exit 0
